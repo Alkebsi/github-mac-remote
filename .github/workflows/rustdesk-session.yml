@@ -168,164 +168,158 @@ jobs:
           sleep 10
 
       - name: 🔑 Get RustDesk ID
-        id: get_id
+        shell: bash
         run: |
-          # Wait for full initialization
-          sleep 5
-          
+          set -euo pipefail
+
           RUSTDESK_CLI="/Applications/RustDesk.app/Contents/MacOS/rustdesk"
-          
-          if [ -f "$RUSTDESK_CLI" ]; then
-            # Try to get ID
-            RUSTDESK_ID=$("$RUSTDESK_CLI" --get-id 2>/dev/null || echo "")
-            
-            if [ -z "$RUSTDESK_ID" ]; then
-              # Try from config file
+          RUSTDESK_ID=""
+
+          for attempt in {1..12}; do
+            if [[ -x "$RUSTDESK_CLI" ]]; then
+              RUSTDESK_ID=$("$RUSTDESK_CLI" --get-id 2>/dev/null || true)
+            fi
+
+            if [[ -z "$RUSTDESK_ID" ]]; then
               CONFIG_DIR="$HOME/Library/Application Support/RustDesk"
-              RUSTDESK_ID=$(cat "${CONFIG_DIR}/id" 2>/dev/null || echo "")
+              RUSTDESK_ID=$(cat "$CONFIG_DIR/id" 2>/dev/null || true)
             fi
-            
-            if [ -n "$RUSTDESK_ID" ]; then
-              echo "RUSTDESK_ID=${RUSTDESK_ID}" >> $GITHUB_ENV
-              echo "✅ RustDesk ID: ${RUSTDESK_ID}"
-            else
-              echo "⚠️ Could not retrieve RustDesk ID automatically"
-              echo "RUSTDESK_ID=Check_Logs" >> $GITHUB_ENV
+
+            if [[ -n "$RUSTDESK_ID" && "$RUSTDESK_ID" != "Check_Logs" ]]; then
+              echo "RUSTDESK_ID=$RUSTDESK_ID" >> "$GITHUB_ENV"
+              echo "RustDesk ID retrieved."
+              exit 0
             fi
-          fi
+
+            sleep 5
+          done
+
+          echo "ERROR: Could not retrieve the RustDesk ID."
+          exit 1
 
       - name: 💾 Save Credentials (Private File)
+        shell: bash
         run: |
+          set -euo pipefail
+
+          : "${MAC_USER:?MAC_USER was not set}"
+          : "${MAC_PASSWORD:?MAC_PASSWORD was not set}"
+          : "${RUSTDESK_PASSWORD:?RUSTDESK_PASSWORD was not set}"
+          : "${RUSTDESK_ID:?RustDesk ID was not detected}"
+
+          if [[ "$RUSTDESK_ID" == "Check_Logs" ]]; then
+            echo "ERROR: RustDesk could not provide a connection ID."
+            exit 1
+          fi
+
           mkdir -p credentials
-          
-          # Create file with ALL credentials (NOT displayed in logs)
-          cat > credentials/connection-info.txt << EOF
-          ════════════════════════════════════════════════════════════
-                    GITHUB MAC REMOTE - CREDENTIALS
-          ════════════════════════════════════════════════════════════
-          
+
+          cat > credentials/connection-info.txt <<EOF
+          GITHUB MAC REMOTE - CREDENTIALS
+
           Started by: ${{ github.actor }}
           Date/Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           Run ID: ${{ github.run_id }}
-          
-          ────────────────────────────────────────────────────────────
-          🌐 Network Information:
-          ────────────────────────────────────────────────────────────
-          
-            Public IP:  ${{ env.CURRENT_IP }}
-            Location:   ${{ env.IP_CITY }}, ${{ env.IP_COUNTRY }}
-            Provider:   ${{ env.IP_ORG }}
-            WARP VPN:   ${{ env.WARP_ENABLED || 'false' }}
-          
-          ────────────────────────────────────────────────────────────
-          🦀 RustDesk Credentials (use these to connect):
-          ────────────────────────────────────────────────────────────
-          
-            ID:       ${{ env.RUSTDESK_ID }}
-            Password: ${{ env.RUSTDESK_PASSWORD }}
-          
-          ────────────────────────────────────────────────────────────
-          🍎 macOS Admin Credentials:
-          ────────────────────────────────────────────────────────────
-          
-            User:     ${{ env.MAC_USER }}
-            Password: ${{ env.MAC_PASSWORD }}
-          
-            Use these credentials for:
-            • System Settings authentication
-            • Privacy & Security permissions (Input Monitoring, etc.)
-            • Installing apps that require admin
-            • Parsec permissions setup
-          
-          ────────────────────────────────────────────────────────────
-          📖 How to Connect:
-          ────────────────────────────────────────────────────────────
-          
-          1. Download RustDesk from: https://rustdesk.com/download
-          2. Install and open RustDesk on your computer
-          3. Enter the RustDesk ID shown above
-          4. Enter the RustDesk password shown above
-          5. Click Connect!
-          
-          ────────────────────────────────────────────────────────────
-          🎮 Optional: Parsec is also installed!
-          ────────────────────────────────────────────────────────────
-          
-          If you prefer Parsec for lower latency:
-          1. Connect via RustDesk first
-          2. Open Parsec from Applications
-          3. Log in with your Parsec account
-          4. When prompted for permissions, use macOS password above
-          5. Enable hosting and connect from your other device
-          
-          ════════════════════════════════════════════════════════════
-          ⚠️  WARNING: This file contains sensitive credentials.
-              Do not share with others.
-          ════════════════════════════════════════════════════════════
+
+          Network Information:
+          Public IP: ${CURRENT_IP:-Unknown}
+          Location: ${IP_CITY:-Unknown}, ${IP_COUNTRY:-Unknown}
+          Provider: ${IP_ORG:-Unknown}
+          WARP VPN: ${WARP_ENABLED:-false}
+
+          RustDesk Credentials:
+          ID: $RUSTDESK_ID
+          Password: $RUSTDESK_PASSWORD
+
+          macOS Admin Credentials:
+          User: $MAC_USER
+          Password: $MAC_PASSWORD
+
+          Use these credentials to connect to RustDesk and authenticate
+          inside the temporary macOS session.
+
+          SECURITY: This file must be encrypted before being uploaded.
           EOF
 
-      - name: 📦 Upload Credentials Artifact
+          echo "Credentials file created. Passwords are not printed."
+
+      - name: 🔐 Encrypt Credentials Before Upload
+        shell: bash
+        env:
+          AGE_RECIPIENT: ${{ vars.AGE_RECIPIENT }}
+        run: |
+          set -euo pipefail
+
+          : "${AGE_RECIPIENT:?Set the AGE_RECIPIENT repository variable}"
+
+          if [[ "$AGE_RECIPIENT" != age1* ]]; then
+            echo "ERROR: AGE_RECIPIENT is not a valid age recipient."
+            exit 1
+          fi
+
+          if ! command -v age >/dev/null 2>&1; then
+            brew install age
+          fi
+
+          test -s credentials/connection-info.txt
+
+          age --encrypt \
+            --recipient "$AGE_RECIPIENT" \
+            --output credentials/connection-info.txt.age \
+            credentials/connection-info.txt
+
+          test -s credentials/connection-info.txt.age
+
+          rm -f credentials/connection-info.txt
+
+          echo "Credentials encrypted successfully."
+          echo "Plaintext credentials removed from the workspace."
+
+      - name: 📦 Upload Encrypted Credentials Artifact
         uses: actions/upload-artifact@v4
         with:
-          # Artifact name includes the user who started it for identification
           name: credentials-${{ github.actor }}-${{ github.run_id }}
-          path: credentials/
+          path: credentials/connection-info.txt.age
+          if-no-files-found: error
           retention-days: 1
 
+
       - name: 📋 Connection Instructions
+        shell: bash
         run: |
+          set -euo pipefail
+
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════════╗"
-          echo "║              🦀 GITHUB MAC REMOTE - READY                        ║"
-          echo "╚══════════════════════════════════════════════════════════════════╝"
+          echo "=============================================="
+          echo "       GITHUB MAC REMOTE - READY"
+          echo "=============================================="
           echo ""
-          echo "👤 Session started by: ${{ github.actor }}"
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🌐 Public IP: ${{ env.CURRENT_IP }}"
-          echo "📍 Location: ${{ env.IP_CITY }}, ${{ env.IP_COUNTRY }}"
-          if [ "${{ env.WARP_ENABLED }}" = "true" ]; then
-            echo "🔒 VPN: Cloudflare WARP (Unique IP Enabled)"
+
+          echo "Public IP: ${CURRENT_IP:-Unknown}"
+          echo "Location: ${IP_CITY:-Unknown}, ${IP_COUNTRY:-Unknown}"
+
+          if [[ "${WARP_ENABLED:-false}" == "true" ]]; then
+            echo "VPN: Cloudflare WARP enabled"
           fi
-          if [ "${{ env.IP_IS_DUPLICATE }}" = "true" ]; then
-            echo "⚠️  WARNING: This IP was previously used!"
+
+          if [[ "${IP_IS_DUPLICATE:-false}" == "true" ]]; then
+            echo "WARNING: This IP was previously used."
           fi
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
           echo ""
-          echo "🍎 macOS User: ${{ env.MAC_USER }}"
-          echo "🔐 macOS Password: ████████████ (in artifact)"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "macOS user: ${MAC_USER:-Unknown}"
+          echo "RustDesk ID and passwords: encrypted artifact only."
           echo ""
-          echo "🔑 RustDesk ID: ${{ env.RUSTDESK_ID }}"
-          echo "🔐 RustDesk Password: ████████████ (in artifact)"
+          echo "HOW TO CONNECT:"
+          echo "1. Download the credentials artifact from this workflow run."
+          echo "2. Decrypt connection-info.txt.age on your own computer."
+          echo "3. Open RustDesk and enter the ID and password from that file."
           echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "SECURITY:"
+          echo "The public repository may expose the encrypted artifact."
+          echo "Only a holder of your matching private age key can decrypt it."
           echo ""
-          echo "📥 HOW TO GET ALL PASSWORDS:"
-          echo ""
-          echo "   1. Go to the 'Summary' tab of this workflow"
-          echo "   2. Download artifact: credentials-${{ github.actor }}-${{ github.run_id }}"
-          echo "   3. Open the connection-info.txt file"
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "📖 How to connect:"
-          echo ""
-          echo "   1. Download RustDesk: https://rustdesk.com/download"
-          echo "   2. Open RustDesk and enter ID: ${{ env.RUSTDESK_ID }}"
-          echo "   3. Enter the RustDesk password from the artifact"
-          echo "   4. Click Connect!"
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "🎮 Parsec is also installed! Use macOS password for permissions."
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "⏱️  Session active for ${{ env.SESSION_DURATION }} hour(s)"
-          echo ""
-          echo "🔒 SECURITY: Passwords are NOT displayed in logs."
-          echo "   Only you can download the artifact with credentials."
+          echo "Session duration: ${SESSION_DURATION:-Unknown} hour(s)"
           echo ""
 
       - name: ⏱️ Keep Session Alive
