@@ -46,15 +46,20 @@ on:
 env:
   SESSION_DURATION: ${{ github.event.inputs.duration }}
 
+permissions:
+  contents: read
+
 jobs:
   mac-rustdesk-session:
     name: 🦀 Mac RustDesk Session (macOS ${{ github.event.inputs.macos_version }})
     runs-on: ${{ github.event.inputs.runner_size == 'xlarge' && format('macos-{0}-xlarge', github.event.inputs.macos_version) || github.event.inputs.runner_size == 'large' && format('macos-{0}-large', github.event.inputs.macos_version) || github.event.inputs.runner_size == 'intel' && github.event.inputs.macos_version == '26' && 'macos-26-intel' || format('macos-{0}', github.event.inputs.macos_version) }}
-    timeout-minutes: 370
+    timeout-minutes: 360
     
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
